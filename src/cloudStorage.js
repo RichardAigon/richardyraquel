@@ -12,9 +12,12 @@ const HOUSEHOLD_KEY = "ff-household-id";
 
 // Estado de conexión visible desde la UI (ver <CloudStatusBanner/> en App.jsx).
 // No usamos React state acá porque este archivo es JS plano, así que avisamos
-// con eventos del navegador y App.jsx los escucha.
-function reportStatus(status, message) {
-  window.dispatchEvent(new CustomEvent("cloudstorage-status", { detail: { status, message } }));
+// con eventos del navegador y App.jsx los escucha. "source" separa el guardado
+// normal de la sincronización en vivo, para que un "ok" de uno no tape un error
+// del otro (por ejemplo: guardar funciona bien, pero la sincronización en vivo
+// se cortó — antes ese error podía quedar tapado por el próximo guardado exitoso).
+function reportStatus(source, status, message) {
+  window.dispatchEvent(new CustomEvent("cloudstorage-status", { detail: { source, status, message } }));
 }
 
 export function getHouseholdId() {
@@ -34,19 +37,19 @@ function docRef(key) {
 // Se instala como window.storage para que App.jsx funcione sin modificaciones.
 export function installCloudStorage() {
   if (!firebaseConfigured) {
-    reportStatus("unconfigured", "Firebase todavía no está configurado en src/firebase.js — los datos no se están guardando en la nube.");
+    reportStatus("storage", "unconfigured", "Firebase todavía no está configurado en src/firebase.js — los datos no se están guardando en la nube.");
   }
   window.storage = {
     async get(key) {
       if (!firebaseConfigured) return null;
       try {
         const snap = await getDoc(docRef(key));
-        reportStatus("ok");
+        reportStatus("storage", "ok");
         if (!snap.exists()) return null;
         return { key, value: snap.data().value, shared: false };
       } catch (e) {
         console.error("cloudStorage.get error:", e);
-        reportStatus("error", `No se pudo conectar con la base de datos: ${e.message}`);
+        reportStatus("storage", "error", `No se pudo conectar con la base de datos: ${e.message}`);
         return null;
       }
     },
@@ -56,11 +59,11 @@ export function installCloudStorage() {
         const updatedAt = Date.now();
         await setDoc(docRef(key), { value, updatedAt });
         window.__lastLocalWrite = updatedAt;
-        reportStatus("ok");
+        reportStatus("storage", "ok");
         return { key, value, shared: false };
       } catch (e) {
         console.error("cloudStorage.set error:", e);
-        reportStatus("error", `No se pudo guardar en la nube: ${e.message}`);
+        reportStatus("storage", "error", `No se pudo guardar en la nube: ${e.message}`);
         return null;
       }
     },
@@ -80,16 +83,26 @@ export function subscribeToRemoteChanges(key, onRemoteChange) {
   const hh = getHouseholdId();
   if (!hh) return () => {};
   const ref = doc(db, "households", hh, "data", key);
-  return onSnapshot(ref, (snap) => {
-    if (!snap.exists()) return;
-    const data = snap.data();
-    // Si el cambio lo escribimos nosotros mismos hace un instante, lo ignoramos
-    // (evita que la app se refresque sola con su propio guardado y pierda el foco del usuario).
-    if (window.__lastLocalWrite && Math.abs(data.updatedAt - window.__lastLocalWrite) < 1500) return;
-    try {
-      onRemoteChange(JSON.parse(data.value));
-    } catch (e) {
-      console.error("Error aplicando cambio remoto:", e);
+  return onSnapshot(
+    ref,
+    (snap) => {
+      reportStatus("sync", "ok");
+      if (!snap.exists()) return;
+      const data = snap.data();
+      // Si el cambio lo escribimos nosotros mismos hace un instante, lo ignoramos
+      // (evita que la app se refresque sola con su propio guardado y pierda el foco del usuario).
+      if (window.__lastLocalWrite && Math.abs(data.updatedAt - window.__lastLocalWrite) < 1500) return;
+      try {
+        onRemoteChange(JSON.parse(data.value));
+      } catch (e) {
+        console.error("Error aplicando cambio remoto:", e);
+      }
+    },
+    (error) => {
+      // Esto es lo que antes fallaba en silencio: si la conexión en vivo se cae
+      // (reglas de Firestore, límites, red), ahora se avisa con el cartel rojo.
+      console.error("subscribeToRemoteChanges error:", error);
+      reportStatus("sync", "error", `Se cortó la sincronización en vivo (${error.code || error.message}). Recargá la página en ambas computadoras.`);
     }
-  });
+  );
 }

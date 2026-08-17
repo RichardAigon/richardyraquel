@@ -1156,20 +1156,24 @@ function LockScreen({ state, requestedPerson, onUnlock, onCancel }) {
 }
 
 function CloudStatusBanner() {
-  const [status, setStatus] = useState(null);
+  // Dos canales independientes: uno para guardado/lectura normal, otro para la
+  // sincronización en vivo. Así, si guardar funciona pero la sincronización en
+  // vivo se cortó, ese aviso no queda tapado por el próximo guardado exitoso.
+  const [statuses, setStatuses] = useState({ storage: null, sync: null });
   useEffect(() => {
     function handler(e) {
-      if (e.detail.status === "ok") setStatus(null);
-      else setStatus(e.detail);
+      const { source, status, message } = e.detail;
+      setStatuses((prev) => ({ ...prev, [source]: status === "ok" ? null : { status, message } }));
     }
     window.addEventListener("cloudstorage-status", handler);
     return () => window.removeEventListener("cloudstorage-status", handler);
   }, []);
-  if (!status) return null;
+  const active = statuses.storage || statuses.sync;
+  if (!active) return null;
   return (
     <div className="ff-cloud-banner">
       <AlertTriangle size={14} />
-      <span>{status.message}</span>
+      <span>{active.message}</span>
     </div>
   );
 }
