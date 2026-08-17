@@ -1,0 +1,14 @@
+{
+  "name": "Finanzas Familia",
+  "short_name": "Finanzas",
+  "description": "Sistema financiero de Richard y Raquel",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAF7F1",
+  "theme_color": "#146C55",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
