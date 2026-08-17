@@ -2489,10 +2489,10 @@ export default function App() {
   }
 
   if (!unlockedPerson) {
-    return <><CloudStatusBanner /><LockScreen state={state} onUnlock={handleUnlock} /></>;
+    return <div className="ff-root" data-theme={resolvedTheme}><StyleSheet theme={resolvedTheme} /><CloudStatusBanner /><LockScreen state={state} onUnlock={handleUnlock} /></div>;
   }
   if (switchRequest) {
-    return <><CloudStatusBanner /><LockScreen state={state} requestedPerson={switchRequest} onUnlock={handleUnlock} onCancel={() => setSwitchRequest(null)} /></>;
+    return <div className="ff-root" data-theme={resolvedTheme}><StyleSheet theme={resolvedTheme} /><CloudStatusBanner /><LockScreen state={state} requestedPerson={switchRequest} onUnlock={handleUnlock} onCancel={() => setSwitchRequest(null)} /></div>;
   }
 
   return (
