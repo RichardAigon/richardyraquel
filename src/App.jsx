@@ -1178,7 +1178,19 @@ function CloudStatusBanner() {
   );
 }
 
-function TopBar({ state, activeUser, onRequestSwitch, viewMode, setViewMode }) {
+function SaveIndicator({ status }) {
+  if (status === "idle") return null;
+  const map = {
+    saving: { label: "Guardando…", tone: "amber" },
+    saved: { label: "Guardado", tone: "emerald" },
+    error: { label: "No se pudo guardar", tone: "red" },
+  };
+  const cfg = map[status];
+  if (!cfg) return null;
+  return <span className={`ff-save-indicator ff-save-indicator--${cfg.tone}`}>{cfg.label}</span>;
+}
+
+function TopBar({ state, activeUser, onRequestSwitch, viewMode, setViewMode, saveStatus }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   return (
     <div className="ff-topbar">
@@ -1195,6 +1207,7 @@ function TopBar({ state, activeUser, onRequestSwitch, viewMode, setViewMode }) {
             ))}
           </div>
         )}
+        <SaveIndicator status={saveStatus} />
       </div>
       <div className="ff-segmented ff-topbar__mode">
         <button className={viewMode === "mio" ? "active" : ""} onClick={() => setViewMode("mio")}><User size={13} /> Mi dinero</button>
@@ -2079,6 +2092,7 @@ export default function App() {
   const [tab, setTab] = useState("inicio");
   const [activeUser, setActiveUserState] = useState(DEFAULT_STATE.settings.lastActiveUser);
   const [unlockedPerson, setUnlockedPerson] = useState(() => localStorage.getItem("ff-unlocked-person"));
+  const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved | error
   const [switchRequest, setSwitchRequest] = useState(null); // personId pedido desde el TopBar, o null
   const [viewMode, setViewMode] = useState("familia");
   const [fabOpen, setFabOpen] = useState(false);
@@ -2107,19 +2121,79 @@ export default function App() {
 
   // Sincronización en vivo entre celulares: si Raquel guarda algo desde el suyo,
   // acá se actualiza solo, sin recargar la página.
+  const isRemoteUpdateRef = useRef(false);
   useEffect(() => {
     if (!loaded) return;
     const unsubscribe = subscribeToRemoteChanges(STORAGE_KEY, (remoteState) => {
+      isRemoteUpdateRef.current = true; // evita que este cambio dispare un guardado de vuelta (eco innecesario)
       setState(reconcileState(remoteState));
     });
     return unsubscribe;
   }, [loaded]);
 
+  const pendingSaveRef = useRef(null); // { timeoutId, flush } — guardado pendiente que todavía no se disparó
+
   useEffect(() => {
     if (!loaded || !state) return;
-    const t = setTimeout(() => { window.storage.set(STORAGE_KEY, JSON.stringify(state)).catch(() => {}); }, 350);
-    return () => clearTimeout(t);
+    if (isRemoteUpdateRef.current) {
+      // Este cambio de estado vino de la sincronización en vivo (otro dispositivo ya lo guardó),
+      // no hace falta volver a guardarlo — ahorra escrituras y reduce el riesgo de choques.
+      isRemoteUpdateRef.current = false;
+      return;
+    }
+    setSaveStatus("saving");
+    const flush = () => {
+      window.storage.set(STORAGE_KEY, JSON.stringify(state))
+        .then((res) => setSaveStatus(res ? "saved" : "error"))
+        .catch(() => setSaveStatus("error"));
+      pendingSaveRef.current = null;
+    };
+    const t = setTimeout(flush, 350);
+    pendingSaveRef.current = { timeoutId: t, flush };
+    return () => {
+      clearTimeout(t);
+      if (pendingSaveRef.current && pendingSaveRef.current.timeoutId === t) pendingSaveRef.current = null;
+    };
   }, [state, loaded]);
+
+  // En celular, "beforeunload" casi nunca se dispara cuando cambiás de app, apagás
+  // la pantalla o el navegador manda la pestaña a segundo plano — es un aviso pensado
+  // para computadora. Acá usamos "visibilitychange" y "pagehide", que sí son confiables
+  // en celular: apenas la app deja de estar visible, disparamos el guardado pendiente
+  // de inmediato (sin esperar los 350ms de espera normal), para no perder el cambio.
+  useEffect(() => {
+    function flushPendingSave() {
+      if (pendingSaveRef.current) {
+        clearTimeout(pendingSaveRef.current.timeoutId);
+        pendingSaveRef.current.flush();
+      }
+    }
+    function handleVisibility() {
+      if (document.visibilityState === "hidden") flushPendingSave();
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("pagehide", flushPendingSave);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("pagehide", flushPendingSave);
+    };
+  }, []);
+
+  // En computadora sí funciona bien "beforeunload" — lo dejamos como capa extra de
+  // aviso ahí, aunque el mecanismo de arriba ya debería haber guardado antes de esto.
+  useEffect(() => {
+    function handler(e) {
+      if (saveStatus === "saving") { e.preventDefault(); e.returnValue = ""; }
+    }
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [saveStatus]);
+
+  useEffect(() => {
+    if (saveStatus !== "saved") return;
+    const t = setTimeout(() => setSaveStatus("idle"), 2500);
+    return () => clearTimeout(t);
+  }, [saveStatus]);
 
   useEffect(() => {
     if (!state) return;
@@ -2504,7 +2578,7 @@ export default function App() {
       <CloudStatusBanner />
       <StyleSheet theme={resolvedTheme} />
       <div className="ff-app">
-        <TopBar state={state} activeUser={activeUser} onRequestSwitch={requestSwitch} viewMode={viewMode} setViewMode={setViewMode} />
+        <TopBar state={state} activeUser={activeUser} onRequestSwitch={requestSwitch} viewMode={viewMode} setViewMode={setViewMode} saveStatus={saveStatus} />
         <div className="ff-scroll">
           {tab === "inicio" && <DashboardTab state={state} viewOwner={effectiveOwner} activeUser={activeUser} onDistribute={distribute} onNavigate={setTab} onOpenSimulator={() => setModal("simulador")} />}
           {tab === "movimientos" && <MovimientosTab state={state} viewOwner={effectiveOwner} onVoid={voidMovement} onEdit={editMovement} />}
@@ -2603,6 +2677,10 @@ function StyleSheet() {
 
       .ff-topbar{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:14px 16px 0; position:relative; z-index:5; }
       .ff-topbar__who{ position:relative; }
+      .ff-save-indicator{ margin-left:8px; font-size:11px; font-weight:700; }
+      .ff-save-indicator--amber{ color:var(--ff-amber); }
+      .ff-save-indicator--emerald{ color:var(--ff-emerald); }
+      .ff-save-indicator--red{ color:var(--ff-red); }
       .ff-who-btn{ display:flex; align-items:center; gap:5px; font-size:12.5px; font-weight:700; color:var(--ff-carbon-soft); background:var(--ff-surface); border:1px solid var(--ff-border); border-radius:99px; padding:7px 12px; }
       .ff-who-btn b{ color:var(--ff-carbon); }
       .ff-who-caret{ transform:rotate(90deg); opacity:.5; }

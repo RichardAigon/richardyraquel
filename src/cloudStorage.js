@@ -10,6 +10,13 @@ import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
 
 const HOUSEHOLD_KEY = "ff-household-id";
 
+// Identificador único de ESTE dispositivo/pestaña, generado una sola vez al cargar.
+// Reemplaza al viejo mecanismo de "comparar marcas de tiempo" para detectar si un
+// cambio en la base de datos lo escribimos nosotros mismos — comparar relojes era
+// frágil (bastaba con hacer dos cambios seguidos para que se confundiera). Con un
+// ID propio, la detección es exacta siempre, sin importar la velocidad de uso.
+const deviceId = Math.random().toString(36).slice(2) + "-" + Date.now().toString(36);
+
 // Estado de conexión visible desde la UI (ver <CloudStatusBanner/> en App.jsx).
 // No usamos React state acá porque este archivo es JS plano, así que avisamos
 // con eventos del navegador y App.jsx los escucha. "source" separa el guardado
@@ -57,8 +64,7 @@ export function installCloudStorage() {
       if (!firebaseConfigured) return null;
       try {
         const updatedAt = Date.now();
-        await setDoc(docRef(key), { value, updatedAt });
-        window.__lastLocalWrite = updatedAt;
+        await setDoc(docRef(key), { value, updatedAt, writerId: deviceId });
         reportStatus("storage", "ok");
         return { key, value, shared: false };
       } catch (e) {
@@ -89,9 +95,10 @@ export function subscribeToRemoteChanges(key, onRemoteChange) {
       reportStatus("sync", "ok");
       if (!snap.exists()) return;
       const data = snap.data();
-      // Si el cambio lo escribimos nosotros mismos hace un instante, lo ignoramos
-      // (evita que la app se refresque sola con su propio guardado y pierda el foco del usuario).
-      if (window.__lastLocalWrite && Math.abs(data.updatedAt - window.__lastLocalWrite) < 1500) return;
+      // Si el cambio lo escribimos nosotros mismos (mismo ID de dispositivo), lo
+      // ignoramos — ya lo tenemos aplicado localmente. Esto es exacto siempre,
+      // a diferencia del método viejo de comparar relojes.
+      if (data.writerId === deviceId) return;
       try {
         onRemoteChange(JSON.parse(data.value));
       } catch (e) {
