@@ -2659,7 +2659,8 @@ function StyleSheet() {
       .ff-app{ max-width:480px; margin:0 auto; position:relative; min-height:100vh; }
       .ff-scroll{ padding:20px 16px 0; }
 
-      .ff-cloud-banner{ position:fixed; top:0; left:0; right:0; z-index:200; background:var(--ff-red); color:#fff; padding:10px 16px; font-size:12.5px; font-weight:600; display:flex; align-items:center; gap:8px; text-align:left; }
+      .ff-cloud-banner{ position:fixed; top:0; left:0; right:0; z-index:200; background:var(--ff-red); color:#fff; padding:12px 16px; font-size:12px; font-weight:600; display:flex; align-items:flex-start; gap:8px; text-align:left; line-height:1.45; max-height:40vh; overflow-y:auto; }
+      .ff-cloud-banner svg{ flex-shrink:0; margin-top:2px; }
       .ff-lock-overlay{ position:fixed; inset:0; background:var(--ff-bg); display:flex; align-items:center; justify-content:center; z-index:100; padding:20px; }
       .ff-lock-card{ background:var(--ff-surface); border:1px solid var(--ff-border); border-radius:24px; padding:32px 26px; max-width:340px; width:100%; text-align:center; box-shadow:var(--ff-shadow); }
       .ff-lock-card--shake{ animation: ff-shake .4s; }

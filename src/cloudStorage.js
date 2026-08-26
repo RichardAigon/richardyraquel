@@ -1,30 +1,37 @@
-// Reemplaza a window.storage (que solo existe adentro de Claude) por Firestore,
-// para que Richard y Raquel compartan los mismos datos desde celulares distintos,
-// en vivo, sin tener que hacer nada especial.
+// Reemplaza a window.storage (que solo existe adentro de Claude) por la función
+// de Netlify en netlify/functions/storage.js, respaldada por Netlify Blobs — el
+// almacenamiento propio de Netlify. No hace falta ninguna cuenta ni configuración
+// externa: funciona solo en cuanto el sitio está desplegado en Netlify.
 //
 // Mantiene la MISMA forma que usa App.jsx (get/set con {key, value}), así que
 // el motor financiero no necesitó ningún cambio.
 
-import { db, firebaseConfigured } from "./firebase";
-import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
-
 const HOUSEHOLD_KEY = "ff-household-id";
+const API_PATH = "/api/storage";
 
-// Identificador único de ESTE dispositivo/pestaña, generado una sola vez al cargar.
-// Reemplaza al viejo mecanismo de "comparar marcas de tiempo" para detectar si un
-// cambio en la base de datos lo escribimos nosotros mismos — comparar relojes era
-// frágil (bastaba con hacer dos cambios seguidos para que se confundiera). Con un
-// ID propio, la detección es exacta siempre, sin importar la velocidad de uso.
-const deviceId = Math.random().toString(36).slice(2) + "-" + Date.now().toString(36);
+// Última versión conocida del dato, por clave. Se usa para: (a) detectar si un
+// valor recibido por sondeo es realmente nuevo antes de aplicarlo, y (b) evitar
+// procesar nuestro propio guardado como si fuera un cambio remoto.
+const lastKnownValue = {};
 
-// Estado de conexión visible desde la UI (ver <CloudStatusBanner/> en App.jsx).
-// No usamos React state acá porque este archivo es JS plano, así que avisamos
-// con eventos del navegador y App.jsx los escucha. "source" separa el guardado
-// normal de la sincronización en vivo, para que un "ok" de uno no tape un error
-// del otro (por ejemplo: guardar funciona bien, pero la sincronización en vivo
-// se cortó — antes ese error podía quedar tapado por el próximo guardado exitoso).
 function reportStatus(source, status, message) {
   window.dispatchEvent(new CustomEvent("cloudstorage-status", { detail: { source, status, message } }));
+}
+
+// Traduce errores de red/HTTP a instrucciones concretas, para no depender de que
+// la persona sepa leer la consola del navegador.
+function friendlyErrorMessage(e, action) {
+  const msg = String(e && e.message ? e.message : e);
+  if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("network")) {
+    return `No se pudo ${action}: sin conexión a internet. La app va a reintentar sola cuando vuelva.`;
+  }
+  if (msg.includes("404")) {
+    return `No se pudo ${action}: la función de guardado no está desplegada todavía. Esperá 1-2 minutos después de subir los cambios a GitHub y volvé a intentar.`;
+  }
+  if (msg.includes("500")) {
+    return `No se pudo ${action}: hubo un error en el servidor de Netlify. Probá de nuevo en unos segundos.`;
+  }
+  return `No se pudo ${action}: ${msg}`;
 }
 
 export function getHouseholdId() {
@@ -35,45 +42,47 @@ export function setHouseholdId(id) {
   localStorage.setItem(HOUSEHOLD_KEY, id.trim());
 }
 
-function docRef(key) {
+function apiUrl(key) {
   const hh = getHouseholdId();
-  if (!hh) throw new Error("Falta el código de familia");
-  return doc(db, "households", hh, "data", key);
+  return `${API_PATH}?household=${encodeURIComponent(hh)}&key=${encodeURIComponent(key)}`;
 }
 
 // Se instala como window.storage para que App.jsx funcione sin modificaciones.
 export function installCloudStorage() {
-  if (!firebaseConfigured) {
-    reportStatus("storage", "unconfigured", "Firebase todavía no está configurado en src/firebase.js — los datos no se están guardando en la nube.");
-  }
   window.storage = {
     async get(key) {
-      if (!firebaseConfigured) return null;
+      const hh = getHouseholdId();
+      if (!hh) return null;
       try {
-        const snap = await getDoc(docRef(key));
+        const res = await fetch(apiUrl(key));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
         reportStatus("storage", "ok");
-        if (!snap.exists()) return null;
-        return { key, value: snap.data().value, shared: false };
+        if (data.value === null || data.value === undefined) return null;
+        lastKnownValue[key] = data.value;
+        return { key, value: data.value, shared: false };
       } catch (e) {
         console.error("cloudStorage.get error:", e);
-        reportStatus("storage", "error", `No se pudo conectar con la base de datos: ${e.message}`);
+        reportStatus("storage", "error", friendlyErrorMessage(e, "leer los datos"));
         return null;
       }
     },
     async set(key, value) {
-      if (!firebaseConfigured) return null;
+      const hh = getHouseholdId();
+      if (!hh) return null;
       try {
-        const updatedAt = Date.now();
-        await setDoc(docRef(key), { value, updatedAt, writerId: deviceId });
+        const res = await fetch(apiUrl(key), { method: "POST", body: value });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        lastKnownValue[key] = value;
         reportStatus("storage", "ok");
         return { key, value, shared: false };
       } catch (e) {
         console.error("cloudStorage.set error:", e);
-        reportStatus("storage", "error", `No se pudo guardar en la nube: ${e.message}`);
+        reportStatus("storage", "error", friendlyErrorMessage(e, "guardar"));
         return null;
       }
     },
-    async delete(key) {
+    async delete() {
       return null; // no usado por la app actualmente
     },
     async list() {
@@ -82,34 +91,41 @@ export function installCloudStorage() {
   };
 }
 
-// Sincronización en vivo: si Raquel cambia algo desde su celular, el de Richard
-// se actualiza solo (y viceversa), sin recargar la página.
-// onRemoteChange recibe el estado nuevo (ya parseado) cuando cambia en otro dispositivo.
+// Sincronización entre celulares: acá NO hay un mecanismo de "avisame apenas cambie"
+// como el que ofrece una base de datos en tiempo real — Netlify Blobs es más simple
+// (guardar y leer, nada más). Para lograr que el otro celular se entere de todas
+// formas, esta función pregunta cada 4 segundos "¿cambió algo?" y, si cambió,
+// aplica el cambio. No es instantáneo como antes, pero funciona sin necesitar
+// ningún servicio externo — coherente con "solo GitHub y Netlify".
 export function subscribeToRemoteChanges(key, onRemoteChange) {
   const hh = getHouseholdId();
   if (!hh) return () => {};
-  const ref = doc(db, "households", hh, "data", key);
-  return onSnapshot(
-    ref,
-    (snap) => {
+  let stopped = false;
+
+  async function poll() {
+    if (stopped) return;
+    try {
+      const res = await fetch(apiUrl(key));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
       reportStatus("sync", "ok");
-      if (!snap.exists()) return;
-      const data = snap.data();
-      // Si el cambio lo escribimos nosotros mismos (mismo ID de dispositivo), lo
-      // ignoramos — ya lo tenemos aplicado localmente. Esto es exacto siempre,
-      // a diferencia del método viejo de comparar relojes.
-      if (data.writerId === deviceId) return;
-      try {
-        onRemoteChange(JSON.parse(data.value));
-      } catch (e) {
-        console.error("Error aplicando cambio remoto:", e);
+      if (data.value && data.value !== lastKnownValue[key]) {
+        lastKnownValue[key] = data.value;
+        try {
+          onRemoteChange(JSON.parse(data.value));
+        } catch (e) {
+          console.error("Error aplicando cambio remoto:", e);
+        }
       }
-    },
-    (error) => {
-      // Esto es lo que antes fallaba en silencio: si la conexión en vivo se cae
-      // (reglas de Firestore, límites, red), ahora se avisa con el cartel rojo.
-      console.error("subscribeToRemoteChanges error:", error);
-      reportStatus("sync", "error", `Se cortó la sincronización en vivo (${error.code || error.message}). Recargá la página en ambas computadoras.`);
+    } catch (e) {
+      console.error("subscribeToRemoteChanges error:", e);
+      reportStatus("sync", "error", friendlyErrorMessage(e, "sincronizar con el otro celular"));
     }
-  );
+  }
+
+  const intervalId = setInterval(poll, 4000);
+  return () => {
+    stopped = true;
+    clearInterval(intervalId);
+  };
 }
